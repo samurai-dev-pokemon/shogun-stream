@@ -1,436 +1,431 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
-import { onAuthStateChanged, updateProfile, type User } from "firebase/auth";
-import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
-import { auth, db } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
+import { auth, db, isFirebaseConfigured } from "./firebase";
 
-function createStore<T>(
-  key: string,
-  defaults: T,
-  parse: (raw: unknown) => T,
-  onAfterSet?: (val: T) => void,
-) {
-  let rawCache: string | null | undefined;
-  let cache: T = defaults;
-  const listeners = new Set<() => void>();
-
-  const getSnapshot = (): T => {
-    if (typeof window === "undefined") return defaults;
-    const raw = window.localStorage.getItem(key);
-    if (raw !== rawCache) {
-      rawCache = raw;
-      try {
-        cache = raw ? parse(JSON.parse(raw)) : defaults;
-      } catch {
-        cache = defaults;
-      }
-    }
-    return cache;
-  };
-
-  const subscribe = (cb: () => void) => {
-    listeners.add(cb);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key) cb();
-    };
-    window.addEventListener("storage", onStorage);
-    return () => {
-      listeners.delete(cb);
-      window.removeEventListener("storage", onStorage);
-    };
-  };
-
-  const set = (value: T, skipCloud = false) => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(key, JSON.stringify(value));
-    listeners.forEach((l) => l());
-    if (!skipCloud && onAfterSet) {
-      onAfterSet(value);
-    }
-  };
-
-  return { getSnapshot, subscribe, set, getServerSnapshot: () => defaults };
-}
-
-/* ---------------------------- Firestore Helper --------------------------- */
-
-async function saveToFirestore(patch: Record<string, unknown>, explicitUid?: string) {
-  const uid = explicitUid || auth?.currentUser?.uid;
-  if (!uid || !db) return;
-  try {
-    const ref = doc(db, "users", uid);
-    await setDoc(ref, { ...patch, updatedAt: Date.now() }, { merge: true });
-  } catch (err) {
-    console.error("Firestore sync error:", err);
-  }
-}
-
-/* ------------------------------- Settings ------------------------------- */
-
-export const ACCENTS = {
-  crimson: { label: "Crimson", color: "#b13a41" },
-  brick: { label: "Brick", color: "#9c4137" },
-  rose: { label: "Rose", color: "#a8505c" },
-  ember: { label: "Ember", color: "#b0563a" },
-} as const;
-
-export type AccentKey = keyof typeof ACCENTS;
-
-export type Settings = {
-  accent: AccentKey;
-  autoplay: boolean;
-  muted: boolean;
-  resume: boolean;
-  preferDub: boolean;
-  speed: number;
-  quality: string;
-  pageDrivesEpisodes: boolean;
-  uiScale: number;
-  uppercaseLabels: boolean;
-  solidControls: boolean;
-  font: string;
-  showTitle: boolean;
-  watermark: boolean;
-  sidebarControls: boolean;
-  hide: string[];
-  subtitleSize: number;
-  subtitleColor: string;
-  subtitleBackground: "box" | "shadow";
-  subtitleFont: "default" | "system" | "serif";
-  subtitlePosition: number;
-};
-
-export const DEFAULT_SETTINGS: Settings = {
-  accent: "crimson",
-  autoplay: true,
-  muted: false,
-  resume: true,
-  preferDub: false,
-  speed: 1,
-  quality: "auto",
-  pageDrivesEpisodes: false,
-  uiScale: 1,
-  uppercaseLabels: false,
-  solidControls: false,
-  font: "",
-  showTitle: false,
-  watermark: true,
-  sidebarControls: false,
-  hide: [],
-  subtitleSize: 100,
-  subtitleColor: "#ffffff",
-  subtitleBackground: "box",
-  subtitleFont: "default",
-  subtitlePosition: 0,
-};
-
-const settingsStore = createStore<Settings>(
-  "shogun:settings",
-  DEFAULT_SETTINGS,
-  (raw) => ({
-    ...DEFAULT_SETTINGS,
-    ...(raw as Partial<Settings>),
-  }),
-  (val) => saveToFirestore({ settings: val }),
-);
-
-export function useSettings() {
-  const settings = useSyncExternalStore(
-    settingsStore.subscribe,
-    settingsStore.getSnapshot,
-    settingsStore.getServerSnapshot,
-  );
-  const update = (patch: Partial<Settings>) =>
-    settingsStore.set({ ...settingsStore.getSnapshot(), ...patch });
-  const reset = () => settingsStore.set(DEFAULT_SETTINGS);
-  return { settings, update, reset };
-}
-
-/* -------------------------------- Library -------------------------------- */
-
-export type LibType = "movie" | "series" | "anime";
-
-export type HistoryEntry = {
-  type: LibType;
+export type ProgressItem = {
   id: string;
-  name: string;
-  poster: string;
+  type: "movie" | "series" | "anime";
+  title: string;
+  poster?: string;
+  backdrop?: string;
   season?: number;
   episode?: number;
-  currentTime: number;
+  epTitle?: string;
+  position: number; // seconds or percent 0-100
   duration: number;
   updatedAt: number;
+  malId?: number;
+  anilistId?: number;
 };
 
-export type ListEntry = {
-  type: LibType;
+export type MediaItem = {
   id: string;
-  name: string;
-  poster: string;
-  year?: string;
+  type: "movie" | "series" | "anime";
+  title: string;
+  poster?: string;
+  backdrop?: string;
+  year?: string | number;
+  rating?: number;
+  genres?: string[];
+  overview?: string;
+  malId?: number;
+  anilistId?: number;
 };
 
-const arr = <T,>(raw: unknown): T[] => (Array.isArray(raw) ? (raw as T[]) : []);
-const EMPTY_H: HistoryEntry[] = [];
-const EMPTY_L: ListEntry[] = [];
-
-const historyStore = createStore<HistoryEntry[]>(
-  "shogun:history",
-  EMPTY_H,
-  (r) => arr<HistoryEntry>(r),
-  (val) => saveToFirestore({ history: val }),
-);
-
-const listStore = createStore<ListEntry[]>(
-  "shogun:list",
-  EMPTY_L,
-  (r) => arr<ListEntry>(r),
-  (val) => saveToFirestore({ list: val }),
-);
-
-export const useHistory = () =>
-  useSyncExternalStore(historyStore.subscribe, historyStore.getSnapshot, historyStore.getServerSnapshot);
-export const useMyList = () =>
-  useSyncExternalStore(listStore.subscribe, listStore.getSnapshot, listStore.getServerSnapshot);
-
-export function getHistoryEntry(type: LibType, id: string) {
-  return historyStore.getSnapshot().find((h) => h.type === type && h.id === id);
-}
-
-export function upsertHistory(entry: HistoryEntry) {
-  const rest = historyStore.getSnapshot().filter((h) => !(h.type === entry.type && h.id === entry.id));
-  historyStore.set([entry, ...rest].slice(0, 40));
-}
-
-export function removeHistory(type: LibType, id: string) {
-  historyStore.set(historyStore.getSnapshot().filter((h) => !(h.type === type && h.id === id)));
-}
-
-export function clearHistory() {
-  historyStore.set([]);
-}
-
-export function toggleList(entry: ListEntry) {
-  const cur = listStore.getSnapshot();
-  const exists = cur.some((l) => l.type === entry.type && l.id === entry.id);
-  listStore.set(exists ? cur.filter((l) => !(l.type === entry.type && l.id === entry.id)) : [entry, ...cur]);
-}
-
-export function clearList() {
-  listStore.set([]);
-}
-
-/* --------------------- Firestore PFP & User Profile ---------------------- */
+export type Settings = {
+  defaultMovieServer: string;
+  defaultAnimeServer: string;
+  defaultAnimeCategory: "sub" | "dub";
+  autoplayNext: boolean;
+  skipIntro: boolean;
+  subtitleLang: string;
+  accentCrimson: boolean;
+  reducedMotion: boolean;
+  theaterByDefault: boolean;
+  adultFilter: boolean;
+};
 
 export type UserProfile = {
   uid: string | null;
   email: string | null;
   displayName: string | null;
-  avatar: string | null;
+  avatar: string | null; // Base64 Data URL stored in Firestore or Google photoURL
 };
 
-const DEFAULT_PROFILE: UserProfile = {
+export const defaultSettings: Settings = {
+  defaultMovieServer: "vidsrc-cc",
+  defaultAnimeServer: "hianime-hd1",
+  defaultAnimeCategory: "sub",
+  autoplayNext: true,
+  skipIntro: true,
+  subtitleLang: "English",
+  accentCrimson: true,
+  reducedMotion: false,
+  theaterByDefault: false,
+  adultFilter: true,
+};
+
+export const defaultProfile: UserProfile = {
   uid: null,
   email: null,
   displayName: null,
   avatar: null,
 };
 
+// Cached constant empty arrays for React 19 / Next.js 16 SSR compatibility
+const EMPTY_HISTORY: ProgressItem[] = [];
+const EMPTY_LIST: MediaItem[] = [];
+
+const getServerSettings = () => defaultSettings;
+const getServerHistory = () => EMPTY_HISTORY;
+const getServerList = () => EMPTY_LIST;
+const getServerProfile = () => defaultProfile;
+
+const HISTORY_KEY = "shogun:history";
+const LIST_KEY = "shogun:list";
+const SETTINGS_KEY = "shogun:settings";
+const PROFILE_KEY = "shogun:profile";
+
+type Listener = () => void;
+const listeners = new Map<string, Set<Listener>>();
+
+function emit(key: string) {
+  listeners.get(key)?.forEach((fn) => fn());
+}
+
+function subscribe(key: string, fn: Listener) {
+  if (!listeners.has(key)) listeners.set(key, new Set());
+  listeners.get(key)!.add(fn);
+  return () => {
+    listeners.get(key)?.delete(fn);
+  };
+}
+
+const subscribeSettings = (cb: Listener) => subscribe(SETTINGS_KEY, cb);
+const subscribeHistory = (cb: Listener) => subscribe(HISTORY_KEY, cb);
+const subscribeList = (cb: Listener) => subscribe(LIST_KEY, cb);
+const subscribeProfile = (cb: Listener) => subscribe(PROFILE_KEY, cb);
+
+const cache = new Map<string, { raw: string | null; parsed: unknown }>();
+
+function readJSON<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    if (cache.has(key) && cache.get(key)!.raw === raw) {
+      return cache.get(key)!.parsed as T;
+    }
+    const parsed = raw ? (JSON.parse(raw) as T) : fallback;
+    cache.set(key, { raw, parsed });
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocalOnly<T>(key: string, value: T) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = JSON.stringify(value);
+    localStorage.setItem(key, raw);
+    cache.set(key, { raw, parsed: value });
+    emit(key);
+  } catch {}
+}
+
+// --- Firestore Cloud Sync State ---
+let currentUid: string | null = null;
+let unsubscribeSnapshot: (() => void) | null = null;
 let pendingSignupProfile: { displayName?: string; avatar?: string | null } | null = null;
 
-export function setPendingSignupProfile(data: { displayName?: string; avatar?: string | null } | null) {
+export function setPendingSignupProfile(data: {
+  displayName?: string;
+  avatar?: string | null;
+}) {
   pendingSignupProfile = data;
 }
 
-const profileStore = createStore<UserProfile>(
-  "shogun:profile",
-  DEFAULT_PROFILE,
-  (raw) => ({
-    ...DEFAULT_PROFILE,
-    ...(raw as Partial<UserProfile>),
-  }),
-);
+async function pushToCloud(data: Record<string, unknown>) {
+  if (!currentUid || !isFirebaseConfigured) return;
+  try {
+    const userRef = doc(db, "users", currentUid);
+    await setDoc(
+      userRef,
+      { ...data, updatedAt: Date.now() },
+      { merge: true }
+    );
+  } catch (err) {
+    console.error("Failed to sync with Firestore:", err);
+  }
+}
 
-export const useUserProfile = () =>
-  useSyncExternalStore(profileStore.subscribe, profileStore.getSnapshot, profileStore.getServerSnapshot);
+function writeJSON<T>(key: string, value: T) {
+  writeLocalOnly(key, value);
 
-/**
- * Center-crops and compresses any uploaded image into a compact 200x200 Data URL (~18KB)
- * so it can be stored directly inside Firestore's `users/{uid}` document.
- */
+  if (currentUid && isFirebaseConfigured) {
+    if (key === SETTINGS_KEY) pushToCloud({ settings: value });
+    if (key === HISTORY_KEY) pushToCloud({ history: value });
+    if (key === LIST_KEY) pushToCloud({ list: value });
+  }
+}
+
+// Initialize Auth + Real-Time Firestore Listener on Client
+if (typeof window !== "undefined" && isFirebaseConfigured) {
+  onAuthStateChanged(auth, async (user) => {
+    if (unsubscribeSnapshot) {
+      unsubscribeSnapshot();
+      unsubscribeSnapshot = null;
+    }
+
+    if (user) {
+      currentUid = user.uid;
+      const userRef = doc(db, "users", user.uid);
+
+      // Apply pending signup details if this is a brand new registration
+      if (pendingSignupProfile) {
+        const initialProfile: UserProfile = {
+          uid: user.uid,
+          email: user.email,
+          displayName:
+            pendingSignupProfile.displayName ||
+            user.displayName ||
+            user.email?.split("@")[0] ||
+            "Ronin",
+          avatar: pendingSignupProfile.avatar || user.photoURL || null,
+        };
+        pendingSignupProfile = null;
+        writeLocalOnly(PROFILE_KEY, initialProfile);
+        await pushToCloud({
+          email: initialProfile.email,
+          displayName: initialProfile.displayName,
+          avatar: initialProfile.avatar,
+          settings: getSettings(),
+          history: getHistory(),
+          list: getMyList(),
+        });
+      }
+
+      // Listen for real-time updates from Firestore `users/{uid}`
+      unsubscribeSnapshot = onSnapshot(
+        userRef,
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+
+            if (data.settings) {
+              writeLocalOnly(SETTINGS_KEY, {
+                ...defaultSettings,
+                ...data.settings,
+              });
+            }
+            if (Array.isArray(data.history)) {
+              writeLocalOnly(HISTORY_KEY, data.history);
+            }
+            if (Array.isArray(data.list)) {
+              writeLocalOnly(LIST_KEY, data.list);
+            }
+
+            const syncedProfile: UserProfile = {
+              uid: user.uid,
+              email: user.email,
+              displayName:
+                data.displayName ||
+                user.displayName ||
+                user.email?.split("@")[0] ||
+                "Ronin",
+              avatar: data.avatar || user.photoURL || null,
+            };
+            writeLocalOnly(PROFILE_KEY, syncedProfile);
+          } else {
+            // First time user logged in — seed Firestore with current local data
+            const initialProfile: UserProfile = {
+              uid: user.uid,
+              email: user.email,
+              displayName:
+                user.displayName || user.email?.split("@")[0] || "Ronin",
+              avatar: user.photoURL || null,
+            };
+            writeLocalOnly(PROFILE_KEY, initialProfile);
+            pushToCloud({
+              email: initialProfile.email,
+              displayName: initialProfile.displayName,
+              avatar: initialProfile.avatar,
+              settings: getSettings(),
+              history: getHistory(),
+              list: getMyList(),
+            });
+          }
+        },
+        (err) => {
+          console.error("Firestore user listener error:", err);
+        }
+      );
+    } else {
+      currentUid = null;
+      writeLocalOnly(PROFILE_KEY, defaultProfile);
+    }
+  });
+}
+
+// --- Avatar Image Compression Helper (Crops & resizes to 200x200 WebP/JPEG for Firestore) ---
 export function compressAvatarFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.onload = () => {
+    reader.onload = (e) => {
       const img = new Image();
-      img.onerror = () => reject(new Error("Invalid image file"));
       img.onload = () => {
         const size = 200;
         const canvas = document.createElement("canvas");
         canvas.width = size;
         canvas.height = size;
         const ctx = canvas.getContext("2d");
-        if (!ctx) return reject(new Error("Canvas unavailable"));
+        if (!ctx) return reject(new Error("Canvas context unavailable"));
 
+        // Center-crop square
         const minSide = Math.min(img.width, img.height);
         const sx = (img.width - minSide) / 2;
         const sy = (img.height - minSide) / 2;
 
         ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
 
-        // Try WebP first; fallback to JPEG for older Safari/iOS
+        // Export compressed WebP (or JPEG fallback) ~10-20KB
         let dataUrl = canvas.toDataURL("image/webp", 0.82);
         if (!dataUrl.startsWith("data:image/webp")) {
           dataUrl = canvas.toDataURL("image/jpeg", 0.82);
         }
         resolve(dataUrl);
       };
-      img.src = reader.result as string;
+      img.onerror = () => reject(new Error("Invalid image file"));
+      img.src = e.target?.result as string;
     };
+    reader.onerror = () => reject(new Error("Failed to read file"));
     reader.readAsDataURL(file);
   });
 }
 
-/**
- * Saves a compressed PFP directly to Firestore `users/{uid}.avatar`
- */
-export async function updateUserAvatar(fileOrDataUrl: File | string, explicitUid?: string) {
-  const dataUrl =
-    typeof fileOrDataUrl === "string"
-      ? fileOrDataUrl
-      : await compressAvatarFile(fileOrDataUrl);
-
-  const current = profileStore.getSnapshot();
-  const uid = explicitUid || current.uid || auth?.currentUser?.uid || null;
-
-  profileStore.set({ ...current, uid, avatar: dataUrl }, true);
-  await saveToFirestore({ avatar: dataUrl }, uid ?? undefined);
-  return dataUrl;
-}
-
-export async function updateUserDisplayName(name: string, explicitUid?: string) {
-  const trimmed = name.trim();
-  if (!trimmed) return;
-  const current = profileStore.getSnapshot();
-  const uid = explicitUid || current.uid || auth?.currentUser?.uid || null;
-
-  profileStore.set({ ...current, uid, displayName: trimmed }, true);
-  if (auth?.currentUser) {
-    try {
-      await updateProfile(auth.currentUser, { displayName: trimmed });
-    } catch {
-      // Ignore auth profile error
-    }
+export async function updateUserAvatar(avatarDataUrl: string | null) {
+  const current = getUserProfile();
+  const next: UserProfile = { ...current, avatar: avatarDataUrl };
+  writeLocalOnly(PROFILE_KEY, next);
+  if (currentUid && isFirebaseConfigured) {
+    await pushToCloud({ avatar: avatarDataUrl });
   }
-  await saveToFirestore({ displayName: trimmed }, uid ?? undefined);
 }
 
-/* ---------------- Real-Time Firestore Listener on Login ------------------ */
+export async function updateUserDisplayName(displayName: string) {
+  const current = getUserProfile();
+  const next: UserProfile = { ...current, displayName };
+  writeLocalOnly(PROFILE_KEY, next);
+  if (currentUid && isFirebaseConfigured) {
+    await pushToCloud({ displayName });
+  }
+}
 
-let unsubscribeFirestore: (() => void) | null = null;
+export function getUserProfile(): UserProfile {
+  return { ...defaultProfile, ...readJSON<UserProfile>(PROFILE_KEY, defaultProfile) };
+}
 
-if (typeof window !== "undefined" && auth) {
-  onAuthStateChanged(auth, async (user: User | null) => {
-    if (unsubscribeFirestore) {
-      unsubscribeFirestore();
-      unsubscribeFirestore = null;
-    }
+export function useUserProfile(): UserProfile {
+  return useSyncExternalStore(
+    subscribeProfile,
+    getUserProfile,
+    getServerProfile
+  );
+}
 
-    if (!user) {
-      profileStore.set(DEFAULT_PROFILE, true);
-      return;
-    }
+// --- History / Continue Watching ---
+export function getHistory(): ProgressItem[] {
+  return readJSON<ProgressItem[]>(HISTORY_KEY, EMPTY_HISTORY);
+}
 
-    const currentSnap = profileStore.getSnapshot();
-    const existingAvatar = currentSnap.uid === user.uid ? currentSnap.avatar : null;
+export function saveProgress(item: Omit<ProgressItem, "updatedAt">) {
+  const list = getHistory().filter(
+    (x) => !(x.id === item.id && x.type === item.type)
+  );
+  const next: ProgressItem[] = [
+    { ...item, updatedAt: Date.now() },
+    ...list,
+  ].slice(0, 40);
+  writeJSON(HISTORY_KEY, next);
+}
 
-    const initialProfile: UserProfile = {
-      uid: user.uid,
-      email: user.email,
-      displayName:
-        pendingSignupProfile?.displayName ||
-        user.displayName ||
-        user.email?.split("@")[0] ||
-        "Shogun",
-      avatar:
-        pendingSignupProfile?.avatar ||
-        existingAvatar ||
-        user.photoURL ||
-        null,
-    };
+export function removeProgress(id: string, type: string) {
+  const next = getHistory().filter((x) => !(x.id === id && x.type === type));
+  writeJSON(HISTORY_KEY, next);
+}
 
-    profileStore.set(initialProfile, true);
+export function clearHistory() {
+  writeJSON(HISTORY_KEY, EMPTY_HISTORY);
+}
 
-    if (!db) return;
+export function getItemProgress(
+  id: string,
+  type: string
+): ProgressItem | undefined {
+  return getHistory().find((x) => x.id === id && x.type === type);
+}
 
-    const userDocRef = doc(db, "users", user.uid);
+// --- Watchlist ---
+export function getMyList(): MediaItem[] {
+  return readJSON<MediaItem[]>(LIST_KEY, EMPTY_LIST);
+}
 
-    // Ensure the Firestore document exists on first login/signup
-    try {
-      const snap = await getDoc(userDocRef);
-      if (!snap.exists()) {
-        await setDoc(
-          userDocRef,
-          {
-            email: user.email,
-            displayName: initialProfile.displayName,
-            avatar: initialProfile.avatar,
-            settings: settingsStore.getSnapshot(),
-            history: historyStore.getSnapshot(),
-            list: listStore.getSnapshot(),
-            updatedAt: Date.now(),
-          },
-          { merge: true },
-        );
-      } else if (pendingSignupProfile?.avatar || pendingSignupProfile?.displayName) {
-        await setDoc(
-          userDocRef,
-          {
-            ...(pendingSignupProfile.displayName ? { displayName: pendingSignupProfile.displayName } : {}),
-            ...(pendingSignupProfile.avatar ? { avatar: pendingSignupProfile.avatar } : {}),
-            updatedAt: Date.now(),
-          },
-          { merge: true },
-        );
-      }
-    } catch {
-      // Ignore if offline
-    } finally {
-      pendingSignupProfile = null;
-    }
+export function toggleMyList(item: MediaItem): boolean {
+  const list = getMyList();
+  const exists = list.some((x) => x.id === item.id && x.type === item.type);
+  const next = exists
+    ? list.filter((x) => !(x.id === item.id && x.type === item.type))
+    : [item, ...list];
+  writeJSON(LIST_KEY, next);
+  return !exists;
+}
 
-    // Real-time listener: any PFP, watchlist, history, or setting change in Firestore updates the UI immediately
-    unsubscribeFirestore = onSnapshot(
-      userDocRef,
-      (snap) => {
-        if (!snap.exists()) return;
-        const data = snap.data();
+export function isInMyList(id: string, type: string): boolean {
+  return getMyList().some((x) => x.id === id && x.type === type);
+}
 
-        profileStore.set(
-          {
-            uid: user.uid,
-            email: user.email,
-            displayName: data.displayName || user.displayName || initialProfile.displayName,
-            avatar: data.avatar || user.photoURL || null,
-          },
-          true,
-        );
+export function clearMyList() {
+  writeJSON(LIST_KEY, EMPTY_LIST);
+}
 
-        if (data.settings) {
-          settingsStore.set({ ...DEFAULT_SETTINGS, ...data.settings }, true);
-        }
-        if (Array.isArray(data.history)) {
-          historyStore.set(data.history, true);
-        }
-        if (Array.isArray(data.list)) {
-          listStore.set(data.list, true);
-        }
-      },
-      (err) => {
-        console.warn("Firestore listener warning:", err.message);
-      },
-    );
-  });
+// --- Settings ---
+export function getSettings(): Settings {
+  return { ...defaultSettings, ...readJSON<Partial<Settings>>(SETTINGS_KEY, defaultSettings) };
+}
+
+export function updateSettings(patch: Partial<Settings>) {
+  const next = { ...getSettings(), ...patch };
+  writeJSON(SETTINGS_KEY, next);
+}
+
+export function resetSettings() {
+  writeJSON(SETTINGS_KEY, defaultSettings);
+}
+
+// --- React Hooks ---
+export function useHistory(): ProgressItem[] {
+  return useSyncExternalStore(
+    subscribeHistory,
+    getHistory,
+    getServerHistory
+  );
+}
+
+export function useMyList(): MediaItem[] {
+  return useSyncExternalStore(
+    subscribeList,
+    getMyList,
+    getServerList
+  );
+}
+
+export function useSettings(): Settings {
+  return useSyncExternalStore(
+    subscribeSettings,
+    getSettings,
+    getServerSettings
+  );
 }
