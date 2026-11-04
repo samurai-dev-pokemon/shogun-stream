@@ -66,6 +66,7 @@ export type ProgressItem = {
   id: string;
   type: LibType;
   title: string;
+  name: string;
   poster?: string;
   backdrop?: string;
   year?: string | number;
@@ -90,7 +91,8 @@ export type HistoryEntry = ProgressItem;
 export type MediaItem = {
   id: string;
   type: LibType;
-  title: string;
+  title?: string;
+  name?: string;
   poster?: string;
   backdrop?: string;
   year?: string | number;
@@ -436,19 +438,27 @@ export function getHistory(): ProgressItem[] {
   return readJSON<ProgressItem[]>(HISTORY_KEY, EMPTY_HISTORY);
 }
 
-export function saveProgress(
-  item: Omit<ProgressItem, "updatedAt" | "position" | "duration"> & {
-    position?: number;
-    duration?: number;
-    updatedAt?: number;
-  }
-) {
+export type SaveProgressInput = Omit<
+  ProgressItem,
+  "updatedAt" | "position" | "duration" | "title" | "name"
+> & {
+  title?: string;
+  name?: string;
+  position?: number;
+  duration?: number;
+  updatedAt?: number;
+};
+
+export function saveProgress(item: SaveProgressInput) {
   const list = getHistory().filter(
     (x) => !(x.id === item.id && x.type === item.type)
   );
+  const resolvedTitle = item.title ?? item.name ?? "";
   const next: ProgressItem[] = [
     {
       ...item,
+      title: resolvedTitle,
+      name: item.name ?? resolvedTitle,
       position: item.position ?? item.progress ?? 0,
       duration: item.duration ?? 0,
       updatedAt: item.updatedAt ?? Date.now(),
@@ -507,9 +517,18 @@ export function getMyList(): MediaItem[] {
 export function toggleMyList(item: MediaItem): boolean {
   const list = getMyList();
   const exists = list.some((x) => x.id === item.id && x.type === item.type);
+  const resolvedTitle = item.title ?? item.name ?? "";
   const next = exists
     ? list.filter((x) => !(x.id === item.id && x.type === item.type))
-    : [{ ...item, addedAt: item.addedAt ?? Date.now() }, ...list];
+    : [
+        {
+          ...item,
+          title: resolvedTitle,
+          name: item.name ?? resolvedTitle,
+          addedAt: item.addedAt ?? Date.now(),
+        },
+        ...list,
+      ];
   writeJSON(LIST_KEY, next);
   return !exists;
 }
